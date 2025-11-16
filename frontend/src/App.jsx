@@ -1,13 +1,12 @@
-
-import './App.css'
+import './App.css';
 import React, { useState, useEffect, useRef } from 'react';
-import { Monitor, Activity, Trash2, X, Terminal as TerminalIcon, Wifi, WifiOff, AlertCircle } from 'lucide-react';
+import { Monitor, Activity, Trash2, X, Terminal as TerminalIcon, Wifi, WifiOff, AlertCircle, Settings, Wifi as WifiIcon } from 'lucide-react';
 
 const UDPPingSimulator = () => {
   const [machines, setMachines] = useState([
-    { id: 1, name: 'PC1', ip: '192.168.1.101', port: 9001, x: 150, y: 150, color: '#3b82f6', isServer: false },
-    { id: 2, name: 'PC2', ip: '192.168.1.102', port: 9002, x: 450, y: 150, color: '#10b981', isServer: false },
-    { id: 3, name: 'PC3', ip: '192.168.1.103', port: 9003, x: 300, y: 300, color: '#f59e0b', isServer: false }
+    { id: 1, name: 'PC1', ip: '', port: 9001, x: 150, y: 150, color: '#3b82f6', isServer: false },
+    { id: 2, name: 'PC2', ip: '', port: 9002, x: 450, y: 150, color: '#10b981', isServer: false },
+    { id: 3, name: 'PC3', ip: '', port: 9003, x: 300, y: 300, color: '#f59e0b', isServer: false }
   ]);
   
   const [connections, setConnections] = useState([]);
@@ -20,6 +19,10 @@ const UDPPingSimulator = () => {
   const [simulationActive, setSimulationActive] = useState({});
   const [wsConnected, setWsConnected] = useState(false);
   const [wsStatus, setWsStatus] = useState('Desconectado');
+  const [localIP, setLocalIP] = useState('');
+  const [editingMachine, setEditingMachine] = useState(null);
+  const [editIP, setEditIP] = useState('');
+  const [editPort, setEditPort] = useState('');
   
   const canvasRef = useRef(null);
   const terminalInputRef = useRef(null);
@@ -28,14 +31,12 @@ const UDPPingSimulator = () => {
   const nextId = useRef(4);
   const reconnectTimeoutRef = useRef(null);
 
-  // Auto-scroll terminal
   useEffect(() => {
     if (terminalEndRef.current) {
       terminalEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [terminalHistory]);
 
-  // Conectar a WebSocket
   useEffect(() => {
     connectWebSocket();
     
@@ -59,6 +60,9 @@ const UDPPingSimulator = () => {
         setWsConnected(true);
         setWsStatus('Conectado');
         wsRef.current = ws;
+        
+        // Solicitar IP local
+        ws.send(JSON.stringify({ command: 'scan_network' }));
       };
       
       ws.onmessage = (event) => {
@@ -77,7 +81,6 @@ const UDPPingSimulator = () => {
         setWsStatus('Desconectado');
         wsRef.current = null;
         
-        // Reintentar conexión en 3 segundos
         reconnectTimeoutRef.current = setTimeout(() => {
           console.log('🔄 Intentando reconectar...');
           connectWebSocket();
@@ -91,9 +94,14 @@ const UDPPingSimulator = () => {
   };
 
   const handleWebSocketMessage = (data) => {
-    const { type, machine_id, message, data: msgData, stats } = data;
+    const { type, machine_id, message, data: msgData, stats, local_ip } = data;
     
     switch (type) {
+      case 'network_info':
+        setLocalIP(local_ip);
+        console.log('📡 IP Local detectada:', local_ip);
+        break;
+        
       case 'server_started':
         addToTerminal(machine_id, message, 'system');
         setMachines(prevMachines => prevMachines.map(m => 
@@ -115,7 +123,6 @@ const UDPPingSimulator = () => {
       case 'ping_packet':
         addToTerminal(machine_id, msgData.message, msgData.status === 'success' ? 'success' : 'error');
         
-        // Animar paquete si fue exitoso
         if (msgData.status === 'success' && msgData.rtt) {
           setMachines(currentMachines => {
             const sourceMachine = currentMachines.find(m => m.id === machine_id);
@@ -153,7 +160,6 @@ const UDPPingSimulator = () => {
         addToTerminal(machine_id, `    Tiempos RTT (ms): min = ${min_rtt}, max = ${max_rtt}, promedio = ${avg_rtt}`, 'info');
         addToTerminal(machine_id, '', 'info');
         
-        // Desactivar animación de conexión
         setSimulationActive(prevActive => {
           const activeConnKey = Object.keys(prevActive).find(key => 
             prevActive[key] && key.startsWith(`${machine_id}-`)
@@ -200,10 +206,14 @@ const UDPPingSimulator = () => {
       return;
     }
     
+    const baseIP = localIP || '192.168.1.100';
+    const ipParts = baseIP.split('.');
+    const newLastOctet = parseInt(ipParts[3]) + nextId.current;
+    
     const newMachine = {
       id: nextId.current,
       name: `PC${nextId.current}`,
-      ip: `192.168.1.${100 + nextId.current}`,
+      ip: `${ipParts[0]}.${ipParts[1]}.${ipParts[2]}.${newLastOctet}`,
       port: 9000 + nextId.current,
       x: 100 + Math.random() * 400,
       y: 100 + Math.random() * 200,
@@ -217,7 +227,6 @@ const UDPPingSimulator = () => {
   };
 
   const removeMachine = (id) => {
-    // Detener servidor si está activo
     const machine = machines.find(m => m.id === id);
     if (machine && machine.isServer) {
       sendWebSocketMessage({
@@ -237,8 +246,7 @@ const UDPPingSimulator = () => {
   };
 
   const handleMouseDown = (e, machine) => {
-    // Evitar drag si se hace click en botones
-    if (e.target.tagName === 'BUTTON' || e.target.tagName === 'svg' || e.target.tagName === 'path') {
+    if (e.target.tagName === 'BUTTON' || e.target.tagName === 'svg' || e.target.tagName === 'path' || e.target.tagName === 'INPUT') {
       return;
     }
     
@@ -273,6 +281,21 @@ const UDPPingSimulator = () => {
     }
   };
 
+  const openEditModal = (machine) => {
+    setEditingMachine(machine);
+    setEditIP(machine.ip);
+    setEditPort(machine.port.toString());
+  };
+
+  const saveIPConfig = () => {
+    if (editingMachine) {
+      setMachines(machines.map(m => 
+        m.id === editingMachine.id ? { ...m, ip: editIP, port: parseInt(editPort) } : m
+      ));
+      setEditingMachine(null);
+    }
+  };
+
   const addToTerminal = (machineId, line, type = 'output') => {
     setTerminalHistory(prev => ({
       ...prev,
@@ -290,13 +313,11 @@ const UDPPingSimulator = () => {
     }
     
     if (machine.isServer) {
-      // Detener servidor
       sendWebSocketMessage({
         command: 'stop_server',
         machine_id: machineId
       });
     } else {
-      // Iniciar servidor
       sendWebSocketMessage({
         command: 'start_server',
         machine_id: machineId,
@@ -342,12 +363,11 @@ const UDPPingSimulator = () => {
       }
 
       if (!targetMachine.isServer) {
-        addToTerminal(machineId, `⚠️  Advertencia: ${targetMachine.name} no está ejecutando servidor UDP`, 'warning');
+        addToTerminal(machineId, `⚠️  Advertencia: ${targetMachine.name} (${targetMachine.ip}) no está ejecutando servidor UDP`, 'warning');
         addToTerminal(machineId, `💡 Activa el servidor en ${targetMachine.name} con el botón WiFi`, 'info');
         return;
       }
 
-      // Crear conexión visual
       const connKey = `${machineId}-${targetMachine.id}`;
       if (!connections.find(c => c.key === connKey)) {
         setConnections(prev => [...prev, { 
@@ -360,18 +380,19 @@ const UDPPingSimulator = () => {
 
       setSimulationActive(prev => ({ ...prev, [connKey]: true }));
 
-      // Enviar comando PING al backend Python
       sendWebSocketMessage({
         command: 'ping',
         machine_id: machineId,
         source_ip: machine.ip,
-        target_ip: targetIp
+        target_ip: targetIp,
+        target_port: targetMachine.port
       });
 
     } else if (cmd === 'help') {
       addToTerminal(machineId, '\n📖 Comandos disponibles:', 'info');
       addToTerminal(machineId, '  ping <IP>     - Enviar ping UDP a otra máquina', 'info');
       addToTerminal(machineId, '  list          - Listar todas las máquinas en la red', 'info');
+      addToTerminal(machineId, '  myip          - Mostrar tu IP local', 'info');
       addToTerminal(machineId, '  clear         - Limpiar terminal', 'info');
       addToTerminal(machineId, '  help          - Mostrar esta ayuda', 'info');
       addToTerminal(machineId, '\n💡 Asegúrate de activar el servidor en la PC destino\n', 'info');
@@ -383,6 +404,9 @@ const UDPPingSimulator = () => {
         addToTerminal(machineId, `  ${m.name}: ${m.ip}:${m.port} - ${status}${isCurrent}`, 'info');
       });
       addToTerminal(machineId, '', 'info');
+    } else if (cmd === 'myip') {
+      addToTerminal(machineId, `\n🌐 Tu IP local del sistema: ${localIP || 'Detectando...'}`, 'info');
+      addToTerminal(machineId, `📍 IP configurada en esta PC: ${machine.ip}:${machine.port}\n`, 'info');
     } else if (cmd === 'clear') {
       setTerminalHistory(prev => ({ ...prev, [machineId]: [] }));
     } else if (cmd === '') {
@@ -430,13 +454,21 @@ const UDPPingSimulator = () => {
               <Activity className="text-blue-300" size={32} />
               <span>Simulador UDP PING - Ingeniería de Redes</span>
             </h1>
-            <p className="text-blue-200 text-sm mt-1">Protocolo UDP con medición de RTT y simulación de pérdidas</p>
+            <p className="text-blue-200 text-sm mt-1">Protocolo UDP con medición de RTT real entre máquinas</p>
           </div>
-          <div className={`flex items-center gap-2 px-4 py-2 rounded-lg ${
-            wsConnected ? 'bg-green-900/50 text-green-300' : 'bg-red-900/50 text-red-300'
-          }`}>
-            <div className={`w-3 h-3 rounded-full ${wsConnected ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />
-            <span className="text-sm font-semibold">{wsStatus}</span>
+          <div className="flex items-center gap-3">
+            {localIP && (
+              <div className="bg-blue-900/50 px-3 py-2 rounded-lg flex items-center gap-2">
+                <WifiIcon className="text-blue-300" size={16} />
+                <span className="text-sm text-blue-200">Tu IP: {localIP}</span>
+              </div>
+            )}
+            <div className={`flex items-center gap-2 px-4 py-2 rounded-lg ${
+              wsConnected ? 'bg-green-900/50 text-green-300' : 'bg-red-900/50 text-red-300'
+            }`}>
+              <div className={`w-3 h-3 rounded-full ${wsConnected ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />
+              <span className="text-sm font-semibold">{wsStatus}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -448,6 +480,63 @@ const UDPPingSimulator = () => {
           <div className="flex-1 text-sm">
             <span className="font-semibold">No hay conexión con el servidor backend.</span>
             <span className="text-red-300 ml-2">Ejecuta: <code className="bg-red-950 px-2 py-0.5 rounded">python servidor_websocket.py</code></span>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Edición de IP */}
+      {editingMachine && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-6 w-96 border border-gray-700">
+            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+              <Settings className="text-blue-400" />
+              Configurar {editingMachine.name}
+            </h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Dirección IP</label>
+                <input
+                  type="text"
+                  value={editIP}
+                  onChange={(e) => setEditIP(e.target.value)}
+                  className="w-full bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 focus:border-blue-500 outline-none"
+                  placeholder="192.168.1.100"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Puerto UDP</label>
+                <input
+                  type="number"
+                  value={editPort}
+                  onChange={(e) => setEditPort(e.target.value)}
+                  className="w-full bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 focus:border-blue-500 outline-none"
+                  placeholder="9000"
+                />
+              </div>
+
+              <div className="bg-blue-900/30 border border-blue-700 rounded p-3 text-sm">
+                <p className="text-blue-300">💡 <strong>Consejo:</strong></p>
+                <p className="text-gray-300 mt-1">Usa tu IP local real si quieres hacer ping entre computadoras reales en tu red.</p>
+                <p className="text-gray-400 mt-1 text-xs">Tu IP: {localIP || 'Detectando...'}</p>
+              </div>
+              
+              <div className="flex gap-2">
+                <button
+                  onClick={saveIPConfig}
+                  className="flex-1 bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded font-semibold transition-colors"
+                >
+                  Guardar
+                </button>
+                <button
+                  onClick={() => setEditingMachine(null)}
+                  className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -577,20 +666,31 @@ const UDPPingSimulator = () => {
                 />
                 <div className="text-center pointer-events-none">
                   <div className="font-bold text-sm">{machine.name}</div>
-                  <div className="text-xs text-gray-400">{machine.ip}</div>
+                  <div className="text-xs text-gray-400">{machine.ip}:{machine.port}</div>
                 </div>
                 
                 <div className="flex flex-col gap-1 mt-2">
-                  <button
-                    className="p-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs flex items-center justify-center gap-1 transition-all"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openTerminal(machine);
-                    }}
-                  >
-                    <TerminalIcon className="w-3 h-3" />
-                    Terminal
-                  </button>
+                  <div className="flex gap-1">
+                    <button
+                      className="flex-1 p-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs transition-all flex items-center justify-center gap-1"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openTerminal(machine);
+                      }}
+                    >
+                      <TerminalIcon className="w-3 h-3" />
+                    </button>
+                    <button
+                      className="flex-1 p-1.5 bg-purple-600 hover:bg-purple-500 rounded text-xs transition-all"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openEditModal(machine);
+                      }}
+                      title="Configurar IP y Puerto"
+                    >
+                      <Settings className="w-3 h-3 mx-auto" />
+                    </button>
+                  </div>
                   <div className="flex gap-1">
                     <button
                       className={`flex-1 p-1.5 rounded text-xs transition-all ${
@@ -696,7 +796,7 @@ const UDPPingSimulator = () => {
 
       {/* Footer */}
       <div className="bg-gray-800 border-t border-gray-700 p-2 text-center text-xs text-gray-400">
-        💡 Arrastra las PCs para moverlas | Click "Terminal" para abrir consola | Activa servidor con botón WiFi | Comandos: <code className="bg-gray-700 px-1">ping &lt;IP&gt;</code> | <code className="bg-gray-700 px-1">list</code>
+        💡 Arrastra las PCs | Click <Settings className="inline w-3 h-3" /> para configurar IP | Activa servidor con <Wifi className="inline w-3 h-3" /> | Comandos: <code className="bg-gray-700 px-1">ping &lt;IP&gt;</code> <code className="bg-gray-700 px-1">list</code> <code className="bg-gray-700 px-1">myip</code>
       </div>
     </div>
   );
