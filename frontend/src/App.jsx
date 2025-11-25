@@ -1,14 +1,10 @@
 import './App.css';
 import React, { useState, useEffect, useRef } from 'react';
-import { Monitor, Activity, Trash2, X, Terminal as TerminalIcon, Wifi, WifiOff, AlertCircle, Settings, Wifi as WifiIcon } from 'lucide-react';
+import { Monitor, Activity, Trash2, X, Terminal as TerminalIcon, Wifi, WifiOff, AlertCircle, Settings, Wifi as WifiIcon, Smartphone, Router, RefreshCw, Zap } from 'lucide-react';
 
 const UDPPingSimulator = () => {
-  const [machines, setMachines] = useState([
-    { id: 1, name: 'PC1', ip: '', port: 9001, x: 150, y: 150, color: '#3b82f6', isServer: false },
-    { id: 2, name: 'PC2', ip: '', port: 9002, x: 450, y: 150, color: '#10b981', isServer: false },
-    { id: 3, name: 'PC3', ip: '', port: 9003, x: 300, y: 300, color: '#f59e0b', isServer: false }
-  ]);
-  
+  const [mode, setMode] = useState('local'); // 'local' o 'network'
+  const [machines, setMachines] = useState([]);
   const [connections, setConnections] = useState([]);
   const [activeTerminal, setActiveTerminal] = useState(null);
   const [terminalHistory, setTerminalHistory] = useState({});
@@ -23,12 +19,14 @@ const UDPPingSimulator = () => {
   const [editingMachine, setEditingMachine] = useState(null);
   const [editIP, setEditIP] = useState('');
   const [editPort, setEditPort] = useState('');
+  const [scanning, setScanning] = useState(false);
+  const [showModeSelector, setShowModeSelector] = useState(true);
   
   const canvasRef = useRef(null);
   const terminalInputRef = useRef(null);
   const terminalEndRef = useRef(null);
   const wsRef = useRef(null);
-  const nextId = useRef(4);
+  const nextId = useRef(1);
   const reconnectTimeoutRef = useRef(null);
 
   useEffect(() => {
@@ -61,8 +59,7 @@ const UDPPingSimulator = () => {
         setWsStatus('Conectado');
         wsRef.current = ws;
         
-        // Solicitar IP local
-        ws.send(JSON.stringify({ command: 'scan_network' }));
+        ws.send(JSON.stringify({ command: 'get_network_info' }));
       };
       
       ws.onmessage = (event) => {
@@ -72,110 +69,138 @@ const UDPPingSimulator = () => {
       
       ws.onerror = (error) => {
         console.error('❌ Error WebSocket:', error);
-        setWsStatus('Error de conexión');
+        setWsStatus('Error');
       };
       
       ws.onclose = () => {
-        console.log('🔌 Desconectado del servidor');
+        console.log('🔌 Desconectado');
         setWsConnected(false);
         setWsStatus('Desconectado');
         wsRef.current = null;
         
         reconnectTimeoutRef.current = setTimeout(() => {
-          console.log('🔄 Intentando reconectar...');
           connectWebSocket();
         }, 3000);
       };
       
     } catch (error) {
-      console.error('❌ Error al conectar:', error);
+      console.error('❌ Error:', error);
       setWsStatus('Error');
     }
   };
 
   const handleWebSocketMessage = (data) => {
-    const { type, machine_id, message, data: msgData, stats, local_ip } = data;
+    const { type, machine_id, message, data: msgData, stats, local_ip, devices, ip, port } = data;
     
     switch (type) {
       case 'network_info':
         setLocalIP(local_ip);
-        console.log('📡 IP Local detectada:', local_ip);
+        break;
+        
+      case 'network_scan_complete':
+        console.log('📡 Dispositivos detectados:', devices);
+        const newMachines = devices.map((device, idx) => ({
+          id: nextId.current + idx,
+          name: device.type === 'mobile' ? `📱Mobile${idx + 1}` : 
+                device.type === 'router' ? `🔀Router` : `PC${idx + 1}`,
+          ip: device.ip,
+          port: 9000 + idx + 1,
+          x: 150 + (idx % 3) * 250,
+          y: 150 + Math.floor(idx / 3) * 200,
+          color: device.type === 'mobile' ? '#f59e0b' : 
+                 device.type === 'router' ? '#8b5cf6' : '#3b82f6',
+          isServer: false,
+          deviceType: device.type,
+          canPing: device.type !== 'mobile' && device.type !== 'router'
+        }));
+        
+        nextId.current += devices.length;
+        setMachines(newMachines);
+        setScanning(false);
         break;
         
       case 'server_started':
-        addToTerminal(machine_id, message, 'system');
+        if (machine_id) {
+          addToTerminal(machine_id, message, 'system');
+        }
         setMachines(prevMachines => prevMachines.map(m => 
-          m.id === machine_id ? { ...m, isServer: true } : m
+          m.id === machine_id || m.ip === ip ? { ...m, isServer: true } : m
         ));
         break;
         
       case 'server_stopped':
-        addToTerminal(machine_id, message, 'system');
+        if (machine_id) {
+          addToTerminal(machine_id, message, 'system');
+        }
         setMachines(prevMachines => prevMachines.map(m => 
           m.id === machine_id ? { ...m, isServer: false } : m
         ));
         break;
         
       case 'ping_start':
-        addToTerminal(machine_id, message, 'info');
+        if (machine_id) {
+          addToTerminal(machine_id, message, 'info');
+        }
         break;
         
       case 'ping_packet':
-        addToTerminal(machine_id, msgData.message, msgData.status === 'success' ? 'success' : 'error');
-        
-        if (msgData.status === 'success' && msgData.rtt) {
-          setMachines(currentMachines => {
-            const sourceMachine = currentMachines.find(m => m.id === machine_id);
-            const connKeys = Object.keys(simulationActive);
-            const activeKey = connKeys.find(key => 
-              simulationActive[key] && key.startsWith(`${machine_id}-`)
-            );
-            
-            if (activeKey && sourceMachine) {
-              const targetId = parseInt(activeKey.split('-')[1]);
-              const targetMachine = currentMachines.find(m => m.id === targetId);
+        if (machine_id && msgData) {
+          addToTerminal(machine_id, msgData.message, msgData.status === 'success' ? 'success' : 'error');
+          
+          if (msgData.status === 'success' && msgData.rtt) {
+            setMachines(currentMachines => {
+              const sourceMachine = currentMachines.find(m => m.id === machine_id);
+              const connKeys = Object.keys(simulationActive);
+              const activeKey = connKeys.find(key => 
+                simulationActive[key] && key.startsWith(`${machine_id}-`)
+              );
               
-              if (targetMachine) {
-                const packetId = `${Date.now()}-${msgData.packet}`;
-                setPackets(prev => [...prev, {
-                  id: packetId,
-                  from: sourceMachine,
-                  to: targetMachine,
-                  progress: 0,
-                  connKey: activeKey
-                }]);
+              if (activeKey && sourceMachine) {
+                const targetId = parseInt(activeKey.split('-')[1]);
+                const targetMachine = currentMachines.find(m => m.id === targetId);
                 
-                animatePacket(packetId, msgData.rtt);
+                if (targetMachine) {
+                  const packetId = `${Date.now()}-${msgData.packet}`;
+                  setPackets(prev => [...prev, {
+                    id: packetId,
+                    from: sourceMachine,
+                    to: targetMachine,
+                    progress: 0,
+                    connKey: activeKey
+                  }]);
+                  
+                  animatePacket(packetId, msgData.rtt);
+                }
               }
-            }
-            return currentMachines;
-          });
+              return currentMachines;
+            });
+          }
         }
         break;
         
       case 'ping_complete':
-        const { sent, received, lost, loss_percentage, avg_rtt, min_rtt, max_rtt } = stats;
-        addToTerminal(machine_id, `\n📊 --- Estadísticas ---`, 'info');
-        addToTerminal(machine_id, `    Paquetes: enviados = ${sent}, recibidos = ${received}, perdidos = ${lost} (${loss_percentage}% pérdida)`, 'info');
-        addToTerminal(machine_id, `    Tiempos RTT (ms): min = ${min_rtt}, max = ${max_rtt}, promedio = ${avg_rtt}`, 'info');
-        addToTerminal(machine_id, '', 'info');
-        
-        setSimulationActive(prevActive => {
-          const activeConnKey = Object.keys(prevActive).find(key => 
-            prevActive[key] && key.startsWith(`${machine_id}-`)
-          );
-          if (activeConnKey) {
-            return { ...prevActive, [activeConnKey]: false };
-          }
-          return prevActive;
-        });
+        if (machine_id && stats) {
+          const { sent, received, lost, loss_percentage, avg_rtt, min_rtt, max_rtt } = stats;
+          addToTerminal(machine_id, `\n📊 --- Estadísticas ---`, 'info');
+          addToTerminal(machine_id, `    Paquetes: enviados = ${sent}, recibidos = ${received}, perdidos = ${lost} (${loss_percentage}% pérdida)`, 'info');
+          addToTerminal(machine_id, `    RTT: min = ${min_rtt}ms, max = ${max_rtt}ms, promedio = ${avg_rtt}ms\n`, 'info');
+          
+          setSimulationActive(prevActive => {
+            const activeConnKey = Object.keys(prevActive).find(key => 
+              prevActive[key] && key.startsWith(`${machine_id}-`)
+            );
+            if (activeConnKey) {
+              return { ...prevActive, [activeConnKey]: false };
+            }
+            return prevActive;
+          });
+        }
         break;
         
       case 'error':
         if (machine_id) {
           addToTerminal(machine_id, `❌ Error: ${message}`, 'error');
         }
-        console.error('Error del servidor:', message);
         break;
         
       default:
@@ -188,11 +213,32 @@ const UDPPingSimulator = () => {
       wsRef.current.send(JSON.stringify(data));
     } else {
       console.error('❌ WebSocket no conectado');
-      if (activeTerminal) {
-        addToTerminal(activeTerminal.id, '❌ Error: No hay conexión con el servidor backend', 'error');
-        addToTerminal(activeTerminal.id, '💡 Asegúrate de que el servidor Python esté corriendo', 'warning');
-      }
     }
+  };
+
+  const selectMode = (selectedMode) => {
+    setMode(selectedMode);
+    setShowModeSelector(false);
+    
+    if (selectedMode === 'local') {
+      // Modo simulación local
+      const localMachines = [
+        { id: 1, name: 'PC1', ip: localIP || '192.168.1.100', port: 9001, x: 150, y: 150, color: '#3b82f6', isServer: false, deviceType: 'pc', canPing: true },
+        { id: 2, name: 'PC2', ip: localIP || '192.168.1.100', port: 9002, x: 450, y: 150, color: '#10b981', isServer: false, deviceType: 'pc', canPing: true },
+        { id: 3, name: 'PC3', ip: localIP || '192.168.1.100', port: 9003, x: 300, y: 300, color: '#f59e0b', isServer: false, deviceType: 'pc', canPing: true }
+      ];
+      setMachines(localMachines);
+      nextId.current = 4;
+    } else {
+      // Modo red real - escanear red
+      scanNetwork();
+    }
+  };
+
+  const scanNetwork = () => {
+    setScanning(true);
+    setMachines([]);
+    sendWebSocketMessage({ command: 'scan_network' });
   };
 
   useEffect(() => {
@@ -202,23 +248,19 @@ const UDPPingSimulator = () => {
   }, [activeTerminal]);
 
   const addMachine = () => {
-    if (machines.length >= 5) {
-      return;
-    }
-    
-    const baseIP = localIP || '192.168.1.100';
-    const ipParts = baseIP.split('.');
-    const newLastOctet = parseInt(ipParts[3]) + nextId.current;
+    if (machines.length >= 5 || mode === 'network') return;
     
     const newMachine = {
       id: nextId.current,
       name: `PC${nextId.current}`,
-      ip: `${ipParts[0]}.${ipParts[1]}.${ipParts[2]}.${newLastOctet}`,
+      ip: localIP || '192.168.1.100',
       port: 9000 + nextId.current,
       x: 100 + Math.random() * 400,
       y: 100 + Math.random() * 200,
       color: `hsl(${Math.random() * 360}, 70%, 60%)`,
-      isServer: false
+      isServer: false,
+      deviceType: 'pc',
+      canPing: true
     };
     
     setMachines([...machines, newMachine]);
@@ -227,6 +269,8 @@ const UDPPingSimulator = () => {
   };
 
   const removeMachine = (id) => {
+    if (mode === 'network') return; // No permitir eliminar en modo red
+    
     const machine = machines.find(m => m.id === id);
     if (machine && machine.isServer) {
       sendWebSocketMessage({
@@ -275,6 +319,9 @@ const UDPPingSimulator = () => {
   };
 
   const openTerminal = (machine) => {
+    if (!machine.canPing) {
+      return; // No abrir terminal para móviles/routers
+    }
     setActiveTerminal(machine);
     if (!terminalHistory[machine.id]) {
       setTerminalHistory(prev => ({ ...prev, [machine.id]: [] }));
@@ -282,6 +329,7 @@ const UDPPingSimulator = () => {
   };
 
   const openEditModal = (machine) => {
+    if (mode === 'network') return; // No editar en modo red
     setEditingMachine(machine);
     setEditIP(machine.ip);
     setEditPort(machine.port.toString());
@@ -299,16 +347,16 @@ const UDPPingSimulator = () => {
   const addToTerminal = (machineId, line, type = 'output') => {
     setTerminalHistory(prev => ({
       ...prev,
-      [machineId]: [...(prev[machineId] || []), { text: line, type, timestamp: new Date().toLocaleTimeString() }]
+      [machineId]: [...(prev[machineId] || []), { text: line, type }]
     }));
   };
 
   const toggleServer = (machineId) => {
     const machine = machines.find(m => m.id === machineId);
-    if (!machine) return;
+    if (!machine || !machine.canPing) return;
     
     if (!wsConnected) {
-      addToTerminal(machineId, '❌ No hay conexión con el servidor backend', 'error');
+      addToTerminal(machineId, '❌ No hay conexión con el backend', 'error');
       return;
     }
     
@@ -343,8 +391,7 @@ const UDPPingSimulator = () => {
       }
 
       if (!wsConnected) {
-        addToTerminal(machineId, '❌ No hay conexión con el servidor backend', 'error');
-        addToTerminal(machineId, '💡 Asegúrate de que servidor_websocket.py esté corriendo', 'warning');
+        addToTerminal(machineId, '❌ No hay conexión con el backend', 'error');
         return;
       }
 
@@ -352,8 +399,13 @@ const UDPPingSimulator = () => {
       const targetMachine = machines.find(m => m.ip === targetIp);
 
       if (!targetMachine) {
-        addToTerminal(machineId, `❌ Host ${targetIp} no encontrado en la red`, 'error');
-        addToTerminal(machineId, `💡 IPs disponibles: ${machines.filter(m => m.id !== machineId).map(m => m.ip).join(', ')}`, 'info');
+        addToTerminal(machineId, `❌ Host ${targetIp} no encontrado`, 'error');
+        addToTerminal(machineId, `💡 IPs: ${machines.filter(m => m.id !== machineId && m.canPing).map(m => m.ip).join(', ')}`, 'info');
+        return;
+      }
+
+      if (!targetMachine.canPing) {
+        addToTerminal(machineId, `⚠️ No se puede hacer ping a ${targetMachine.name} (${targetMachine.deviceType})`, 'warning');
         return;
       }
 
@@ -363,8 +415,8 @@ const UDPPingSimulator = () => {
       }
 
       if (!targetMachine.isServer) {
-        addToTerminal(machineId, `⚠️  Advertencia: ${targetMachine.name} (${targetMachine.ip}) no está ejecutando servidor UDP`, 'warning');
-        addToTerminal(machineId, `💡 Activa el servidor en ${targetMachine.name} con el botón WiFi`, 'info');
+        addToTerminal(machineId, `⚠️ ${targetMachine.name} no tiene servidor activo`, 'warning');
+        addToTerminal(machineId, `💡 Activa el servidor con el botón WiFi`, 'info');
         return;
       }
 
@@ -389,31 +441,23 @@ const UDPPingSimulator = () => {
       });
 
     } else if (cmd === 'help') {
-      addToTerminal(machineId, '\n📖 Comandos disponibles:', 'info');
-      addToTerminal(machineId, '  ping <IP>     - Enviar ping UDP a otra máquina', 'info');
-      addToTerminal(machineId, '  list          - Listar todas las máquinas en la red', 'info');
-      addToTerminal(machineId, '  myip          - Mostrar tu IP local', 'info');
-      addToTerminal(machineId, '  clear         - Limpiar terminal', 'info');
-      addToTerminal(machineId, '  help          - Mostrar esta ayuda', 'info');
-      addToTerminal(machineId, '\n💡 Asegúrate de activar el servidor en la PC destino\n', 'info');
+      addToTerminal(machineId, '\n📖 Comandos:', 'info');
+      addToTerminal(machineId, '  ping <IP>  - Hacer ping', 'info');
+      addToTerminal(machineId, '  list       - Listar dispositivos', 'info');
+      addToTerminal(machineId, '  clear      - Limpiar\n', 'info');
     } else if (cmd === 'list') {
-      addToTerminal(machineId, '\n🖥️  Máquinas en la red:', 'info');
+      addToTerminal(machineId, '\n🖥️ Dispositivos:', 'info');
       machines.forEach(m => {
-        const status = m.isServer ? '🟢 Online' : '⚫ Offline';
-        const isCurrent = m.id === machineId ? ' (esta PC)' : '';
-        addToTerminal(machineId, `  ${m.name}: ${m.ip}:${m.port} - ${status}${isCurrent}`, 'info');
+        const icon = m.deviceType === 'mobile' ? '📱' : m.deviceType === 'router' ? '🔀' : '💻';
+        const status = m.isServer ? '🟢' : '⚫';
+        const pingable = m.canPing ? '' : ' (no pingeable)';
+        addToTerminal(machineId, `  ${icon} ${m.name}: ${m.ip}:${m.port} ${status}${pingable}`, 'info');
       });
       addToTerminal(machineId, '', 'info');
-    } else if (cmd === 'myip') {
-      addToTerminal(machineId, `\n🌐 Tu IP local del sistema: ${localIP || 'Detectando...'}`, 'info');
-      addToTerminal(machineId, `📍 IP configurada en esta PC: ${machine.ip}:${machine.port}\n`, 'info');
     } else if (cmd === 'clear') {
       setTerminalHistory(prev => ({ ...prev, [machineId]: [] }));
-    } else if (cmd === '') {
-      // No hacer nada
-    } else {
-      addToTerminal(machineId, `❌ Comando no reconocido: ${cmd}`, 'error');
-      addToTerminal(machineId, '💡 Escribe "help" para ver comandos disponibles', 'info');
+    } else if (cmd !== '') {
+      addToTerminal(machineId, `❌ Comando desconocido: ${cmd}`, 'error');
     }
   };
 
@@ -444,6 +488,74 @@ const UDPPingSimulator = () => {
     }
   };
 
+  const getDeviceIcon = (deviceType) => {
+    switch(deviceType) {
+      case 'mobile': return Smartphone;
+      case 'router': return Router;
+      default: return Monitor;
+    }
+  };
+
+  if (showModeSelector) {
+    return (
+      <div className="w-full h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-gray-900 text-white flex items-center justify-center">
+        <div className="max-w-4xl w-full p-8">
+          <div className="text-center mb-12">
+            <Activity className="w-20 h-20 mx-auto mb-4 text-blue-400" />
+            <h1 className="text-4xl font-bold mb-2">Simulador UDP PING</h1>
+            <p className="text-gray-300">Ingeniería de Redes - Selecciona un modo</p>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-6">
+            {/* MODO 1 */}
+            <button
+              onClick={() => selectMode('local')}
+              className="bg-gray-800/50 backdrop-blur border-2 border-blue-500 rounded-xl p-8 hover:bg-gray-800 hover:scale-105 transition-all text-left group"
+            >
+              <div className="flex items-center gap-4 mb-4">
+                <Zap className="w-12 h-12 text-blue-400 group-hover:animate-pulse" />
+                <h2 className="text-2xl font-bold">MODO 1</h2>
+              </div>
+              <h3 className="text-xl text-blue-300 mb-3">Simulación Local</h3>
+              <ul className="space-y-2 text-gray-300 text-sm">
+                <li>✅ Misma IP, diferentes puertos</li>
+                <li>✅ Perfecto para demos rápidas</li>
+                <li>✅ No requiere múltiples PCs</li>
+                <li>✅ Ideal para presentaciones</li>
+              </ul>
+            </button>
+
+            {/* MODO 2 */}
+            <button
+              onClick={() => selectMode('network')}
+              disabled={!wsConnected}
+              className="bg-gray-800/50 backdrop-blur border-2 border-green-500 rounded-xl p-8 hover:bg-gray-800 hover:scale-105 transition-all text-left group disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <div className="flex items-center gap-4 mb-4">
+                <WifiIcon className="w-12 h-12 text-green-400 group-hover:animate-pulse" />
+                <h2 className="text-2xl font-bold">MODO 2</h2>
+              </div>
+              <h3 className="text-xl text-green-300 mb-3">Red Real Sincronizada</h3>
+              <ul className="space-y-2 text-gray-300 text-sm">
+                <li>✅ Escaneo automático de dispositivos</li>
+                <li>✅ Detección de PCs y móviles</li>
+                <li>✅ Sincronización en tiempo real</li>
+                <li>✅ PINGs reales entre computadoras</li>
+              </ul>
+            </button>
+          </div>
+
+          {!wsConnected && (
+            <div className="mt-8 bg-red-900/30 border border-red-700 rounded-lg p-4 text-center">
+              <AlertCircle className="w-6 h-6 inline mr-2" />
+              <span>Conecta al backend primero: <code className="bg-red-950 px-2 py-1 rounded">python servidor_websocket.py</code></span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="w-full h-screen bg-gray-900 text-white flex flex-col">
       {/* Header */}
@@ -452,15 +564,17 @@ const UDPPingSimulator = () => {
           <div>
             <h1 className="text-2xl font-bold flex items-center gap-3">
               <Activity className="text-blue-300" size={32} />
-              <span>Simulador UDP PING - Ingeniería de Redes</span>
+              <span>Simulador UDP PING - {mode === 'local' ? 'Modo Local' : 'Modo Red Real'}</span>
             </h1>
-            <p className="text-blue-200 text-sm mt-1">Protocolo UDP con medición de RTT real entre máquinas</p>
+            <p className="text-blue-200 text-sm mt-1">
+              {mode === 'local' ? 'Simulación en una sola PC' : 'Red sincronizada con escaneo automático'}
+            </p>
           </div>
           <div className="flex items-center gap-3">
             {localIP && (
               <div className="bg-blue-900/50 px-3 py-2 rounded-lg flex items-center gap-2">
                 <WifiIcon className="text-blue-300" size={16} />
-                <span className="text-sm text-blue-200">Tu IP: {localIP}</span>
+                <span className="text-sm text-blue-200">IP: {localIP}</span>
               </div>
             )}
             <div className={`flex items-center gap-2 px-4 py-2 rounded-lg ${
@@ -469,22 +583,17 @@ const UDPPingSimulator = () => {
               <div className={`w-3 h-3 rounded-full ${wsConnected ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />
               <span className="text-sm font-semibold">{wsStatus}</span>
             </div>
+            <button
+              onClick={() => setShowModeSelector(true)}
+              className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded-lg text-sm transition-colors"
+            >
+              Cambiar Modo
+            </button>
           </div>
         </div>
       </div>
 
-      {/* Alerta si no está conectado */}
-      {!wsConnected && (
-        <div className="bg-red-900/30 border-b border-red-700 px-4 py-3 flex items-center gap-3">
-          <AlertCircle className="text-red-400" size={20} />
-          <div className="flex-1 text-sm">
-            <span className="font-semibold">No hay conexión con el servidor backend.</span>
-            <span className="text-red-300 ml-2">Ejecuta: <code className="bg-red-950 px-2 py-0.5 rounded">python servidor_websocket.py</code></span>
-          </div>
-        </div>
-      )}
-
-      {/* Modal de Edición de IP */}
+      {/* Modal de Edición */}
       {editingMachine && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-lg p-6 w-96 border border-gray-700">
@@ -495,43 +604,35 @@ const UDPPingSimulator = () => {
             
             <div className="space-y-4">
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Dirección IP</label>
+                <label className="block text-sm text-gray-400 mb-1">IP</label>
                 <input
                   type="text"
                   value={editIP}
                   onChange={(e) => setEditIP(e.target.value)}
                   className="w-full bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 focus:border-blue-500 outline-none"
-                  placeholder="192.168.1.100"
                 />
               </div>
               
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Puerto UDP</label>
+                <label className="block text-sm text-gray-400 mb-1">Puerto</label>
                 <input
                   type="number"
                   value={editPort}
                   onChange={(e) => setEditPort(e.target.value)}
                   className="w-full bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 focus:border-blue-500 outline-none"
-                  placeholder="9000"
                 />
-              </div>
-
-              <div className="bg-blue-900/30 border border-blue-700 rounded p-3 text-sm">
-                <p className="text-blue-300">💡 <strong>Consejo:</strong></p>
-                <p className="text-gray-300 mt-1">Usa tu IP local real si quieres hacer ping entre computadoras reales en tu red.</p>
-                <p className="text-gray-400 mt-1 text-xs">Tu IP: {localIP || 'Detectando...'}</p>
               </div>
               
               <div className="flex gap-2">
                 <button
                   onClick={saveIPConfig}
-                  className="flex-1 bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded font-semibold transition-colors"
+                  className="flex-1 bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded font-semibold"
                 >
                   Guardar
                 </button>
                 <button
                   onClick={() => setEditingMachine(null)}
-                  className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+                  className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
                 >
                   Cancelar
                 </button>
@@ -543,16 +644,12 @@ const UDPPingSimulator = () => {
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Canvas de red */}
         <div 
           className="flex-1 relative bg-gradient-to-br from-gray-900 via-gray-850 to-gray-900" 
           ref={canvasRef}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
-          style={{ cursor: draggedMachine ? 'grabbing' : 'default' }}
         >
-          
-          {/* Grid pattern background */}
           <div className="absolute inset-0 opacity-10 pointer-events-none" 
                style={{
                  backgroundImage: 'linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)',
@@ -560,7 +657,15 @@ const UDPPingSimulator = () => {
                }}
           />
 
-          {/* SVG para conexiones y paquetes */}
+          {scanning && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-10">
+              <div className="bg-gray-800 p-8 rounded-lg text-center">
+                <RefreshCw className="w-16 h-16 mx-auto mb-4 animate-spin text-blue-400" />
+                <p className="text-xl">Escaneando red...</p>
+              </div>
+            </div>
+          )}
+
           <svg className="absolute inset-0 pointer-events-none" style={{zIndex: 1}}>
             <defs>
               <filter id="glow">
@@ -610,7 +715,6 @@ const UDPPingSimulator = () => {
               );
             })}
             
-            {/* Paquetes animados */}
             {packets.map(packet => {
               if (!packet.from || !packet.to) return null;
               
@@ -635,106 +739,127 @@ const UDPPingSimulator = () => {
             })}
           </svg>
 
-          {/* Máquinas */}
-          {machines.map(machine => (
-            <div
-              key={machine.id}
-              className="absolute select-none"
-              style={{
-                left: machine.x - 60,
-                top: machine.y - 80,
-                zIndex: 2,
-                cursor: draggedMachine?.id === machine.id ? 'grabbing' : 'grab'
-              }}
-              onMouseDown={(e) => handleMouseDown(e, machine)}
-            >
-              <div className={`bg-gray-800 rounded-lg p-3 w-32 border-2 hover:border-blue-400 transition-all shadow-lg ${
-                activeTerminal?.id === machine.id ? 'ring-2 ring-blue-400 scale-105' : ''
-              }`}
-                   style={{ borderColor: machine.color }}>
-                
-                {/* Indicador de servidor */}
-                {machine.isServer && (
-                  <div className="absolute -top-2 -right-2 bg-green-500 rounded-full p-1 shadow-lg pointer-events-none">
-                    <Wifi className="w-3 h-3" />
-                  </div>
-                )}
+          {machines.map(machine => {
+            const DeviceIcon = getDeviceIcon(machine.deviceType);
+            
+            return (
+              <div
+                key={machine.id}
+                className="absolute select-none"
+                style={{
+                  left: machine.x - 60,
+                  top: machine.y - 80,
+                  zIndex: 2,
+                  cursor: draggedMachine?.id === machine.id ? 'grabbing' : 'grab'
+                }}
+                onMouseDown={(e) => handleMouseDown(e, machine)}
+              >
+                <div className={`bg-gray-800 rounded-lg p-3 w-32 border-2 hover:border-blue-400 transition-all shadow-lg ${
+                  activeTerminal?.id === machine.id ? 'ring-2 ring-blue-400 scale-105' : ''
+                } ${!machine.canPing ? 'opacity-75' : ''}`}
+                     style={{ borderColor: machine.color }}>
+                  
+                  {machine.isServer && (
+                    <div className="absolute -top-2 -right-2 bg-green-500 rounded-full p-1 shadow-lg pointer-events-none">
+                      <Wifi className="w-3 h-3" />
+                    </div>
+                  )}
 
-                <Monitor 
-                  className="w-14 h-14 mx-auto mb-2 drop-shadow-lg pointer-events-none" 
-                  style={{ color: machine.color }} 
-                />
-                <div className="text-center pointer-events-none">
-                  <div className="font-bold text-sm">{machine.name}</div>
-                  <div className="text-xs text-gray-400">{machine.ip}:{machine.port}</div>
-                </div>
-                
-                <div className="flex flex-col gap-1 mt-2">
-                  <div className="flex gap-1">
-                    <button
-                      className="flex-1 p-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs transition-all flex items-center justify-center gap-1"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openTerminal(machine);
-                      }}
-                    >
-                      <TerminalIcon className="w-3 h-3" />
-                    </button>
-                    <button
-                      className="flex-1 p-1.5 bg-purple-600 hover:bg-purple-500 rounded text-xs transition-all"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openEditModal(machine);
-                      }}
-                      title="Configurar IP y Puerto"
-                    >
-                      <Settings className="w-3 h-3 mx-auto" />
-                    </button>
+                  <DeviceIcon 
+                    className="w-14 h-14 mx-auto mb-2 drop-shadow-lg pointer-events-none" 
+                    style={{ color: machine.color }} 
+                  />
+                  <div className="text-center pointer-events-none">
+                    <div className="font-bold text-sm">{machine.name}</div>
+                    <div className="text-xs text-gray-400">{machine.ip}:{machine.port}</div>
                   </div>
-                  <div className="flex gap-1">
-                    <button
-                      className={`flex-1 p-1.5 rounded text-xs transition-all ${
-                        machine.isServer ? 'bg-green-600 hover:bg-green-500' : 'bg-gray-600 hover:bg-gray-500'
-                      }`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleServer(machine.id);
-                      }}
-                      title={machine.isServer ? 'Detener servidor UDP' : 'Iniciar servidor UDP'}
-                    >
-                      {machine.isServer ? <Wifi className="w-3 h-3 mx-auto" /> : <WifiOff className="w-3 h-3 mx-auto" />}
-                    </button>
-                    <button
-                      className="p-1.5 bg-red-600 hover:bg-red-500 rounded transition-all"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeMachine(machine.id);
-                      }}
-                      title="Eliminar máquina"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
+                  
+                  {machine.canPing && (
+                    <div className="flex flex-col gap-1 mt-2">
+                      <div className="flex gap-1">
+                        <button
+                          className="flex-1 p-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs transition-all"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openTerminal(machine);
+                          }}
+                        >
+                          <TerminalIcon className="w-3 h-3 mx-auto" />
+                        </button>
+                        {mode === 'local' && (
+                          <button
+                            className="flex-1 p-1.5 bg-purple-600 hover:bg-purple-500 rounded text-xs transition-all"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openEditModal(machine);
+                            }}
+                          >
+                            <Settings className="w-3 h-3 mx-auto" />
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex gap-1">
+                        <button
+                          className={`flex-1 p-1.5 rounded text-xs transition-all ${
+                            machine.isServer ? 'bg-green-600 hover:bg-green-500' : 'bg-gray-600 hover:bg-gray-500'
+                          }`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleServer(machine.id);
+                          }}
+                        >
+                          {machine.isServer ? <Wifi className="w-3 h-3 mx-auto" /> : <WifiOff className="w-3 h-3 mx-auto" />}
+                        </button>
+                        {mode === 'local' && (
+                          <button
+                            className="p-1.5 bg-red-600 hover:bg-red-500 rounded transition-all"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeMachine(machine.id);
+                            }}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {!machine.canPing && (
+                    <div className="mt-2 text-xs text-gray-500 text-center italic">
+                      Solo visualización
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
-          {/* Botón agregar máquina flotante */}
-          <button
-            onClick={addMachine}
-            disabled={machines.length >= 5}
-            className="absolute bottom-6 right-6 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg shadow-lg font-semibold flex items-center gap-2 transition-all hover:scale-105 z-10"
-          >
-            <Monitor className="w-5 h-5" />
-            Agregar PC ({machines.length}/5)
-          </button>
+          {mode === 'local' && (
+            <button
+              onClick={addMachine}
+              disabled={machines.length >= 5}
+              className="absolute bottom-6 right-6 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg shadow-lg font-semibold flex items-center gap-2 transition-all hover:scale-105 z-10"
+            >
+              <Monitor className="w-5 h-5" />
+              Agregar PC ({machines.length}/5)
+            </button>
+          )}
+
+          {mode === 'network' && (
+            <button
+              onClick={scanNetwork}
+              disabled={scanning}
+              className="absolute bottom-6 right-6 bg-green-600 hover:bg-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg shadow-lg font-semibold flex items-center gap-2 transition-all hover:scale-105 z-10"
+            >
+              <RefreshCw className={`w-5 h-5 ${scanning ? 'animate-spin' : ''}`} />
+              {scanning ? 'Escaneando...' : 'Reescanear Red'}
+            </button>
+          )}
         </div>
 
-        {/* Terminal */}
         {activeTerminal && (
           <div className="w-96 bg-black border-l border-gray-700 flex flex-col shadow-2xl">
-            {/* Terminal Header */}
             <div className="bg-gray-800 p-3 flex items-center justify-between border-b border-gray-700">
               <div className="flex items-center gap-2">
                 <TerminalIcon className="w-5 h-5" style={{ color: activeTerminal.color }} />
@@ -748,13 +873,12 @@ const UDPPingSimulator = () => {
               </button>
             </div>
 
-            {/* Terminal Body */}
             <div className="flex-1 overflow-y-auto p-3 font-mono text-sm bg-black">
               <div className="text-green-400 mb-2">
-                {activeTerminal.name} UDP Client v1.0
+                {activeTerminal.name} UDP Client v2.0
               </div>
               <div className="text-gray-400 mb-3">
-                IP: {activeTerminal.ip}:{activeTerminal.port} | Escribe 'help' para ayuda
+                Modo: {mode === 'local' ? 'Simulación Local' : 'Red Real'} | IP: {activeTerminal.ip}:{activeTerminal.port}
               </div>
               
               {(terminalHistory[activeTerminal.id] || []).map((line, idx) => (
@@ -776,7 +900,6 @@ const UDPPingSimulator = () => {
               <div ref={terminalEndRef} />
             </div>
 
-            {/* Terminal Input */}
             <div className="bg-gray-900 p-3 border-t border-gray-700 flex items-center gap-2">
               <span className="text-green-400">$</span>
               <input
@@ -786,7 +909,7 @@ const UDPPingSimulator = () => {
                 onChange={(e) => setCurrentCommand(e.target.value)}
                 onKeyPress={handleKeyPress}
                 className="flex-1 bg-transparent text-white outline-none font-mono"
-                placeholder={`ping ${machines.find(m => m.id !== activeTerminal.id)?.ip || '192.168.1.x'}`}
+                placeholder="ping <IP> | help | list"
                 autoFocus
               />
             </div>
@@ -794,9 +917,12 @@ const UDPPingSimulator = () => {
         )}
       </div>
 
-      {/* Footer */}
       <div className="bg-gray-800 border-t border-gray-700 p-2 text-center text-xs text-gray-400">
-        💡 Arrastra las PCs | Click <Settings className="inline w-3 h-3" /> para configurar IP | Activa servidor con <Wifi className="inline w-3 h-3" /> | Comandos: <code className="bg-gray-700 px-1">ping &lt;IP&gt;</code> <code className="bg-gray-700 px-1">list</code> <code className="bg-gray-700 px-1">myip</code>
+        {mode === 'local' ? (
+          <>💡 Modo Local: Arrastra PCs | ⚙️ Configurar IP | <Wifi className="inline w-3 h-3" /> Activar servidor | Comandos: ping, list, help</>
+        ) : (
+          <>🌐 Modo Red: Escaneo automático | 💻 PCs detectadas | 📱 Móviles en solo lectura | <Wifi className="inline w-3 h-3" /> Servidor UDP | Sincronizado en tiempo real</>
+        )}
       </div>
     </div>
   );
